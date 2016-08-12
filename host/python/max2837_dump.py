@@ -32,6 +32,10 @@ else:
     if device:
         print 'Find: HackRF One'
     else:
+        device = usb.core.find(idVendor=0x1d50, idProduct=0xcc15)
+        if device:
+            print 'Find: rad1o'
+        else:
         print 'Not find any HackRF device.'
         sys.exit()
 device.set_configuration()

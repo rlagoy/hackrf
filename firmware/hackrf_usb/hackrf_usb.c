@@ -24,13 +24,15 @@
 
 #include <libopencm3/cm3/vector.h>
 
-#include <libopencm3/lpc43xx/gpio.h>
 #include <libopencm3/lpc43xx/m4/nvic.h>
 
 #include <streaming.h>
 
 #include "usb.h"
 #include "usb_standard_request.h"
+
+#include <rom_iap.h>
+#include "usb_descriptor.h"
 
 #include "usb_device.h"
 #include "usb_endpoint.h"
@@ -40,15 +42,13 @@
 #include "usb_api_spiflash.h"
 
 #include "usb_api_transceiver.h"
-#include "rf_path.h"
 #include "sgpio_isr.h"
 #include "usb_bulk_buffer.h"
-#include "si5351c.h"
  
 static volatile transceiver_mode_t _transceiver_mode = TRANSCEIVER_MODE_OFF;
 
 void set_transceiver_mode(const transceiver_mode_t new_transceiver_mode) {
-	baseband_streaming_disable();
+	baseband_streaming_disable(&sgpio_config);
 	
 	usb_endpoint_disable(&usb_endpoint_bulk_in);
 	usb_endpoint_disable(&usb_endpoint_bulk_out);
@@ -56,27 +56,27 @@ void set_transceiver_mode(const transceiver_mode_t new_transceiver_mode) {
 	_transceiver_mode = new_transceiver_mode;
 	
 	if( _transceiver_mode == TRANSCEIVER_MODE_RX ) {
-		gpio_clear(PORT_LED1_3, PIN_LED3);
-		gpio_set(PORT_LED1_3, PIN_LED2);
+		led_off(LED3);
+		led_on(LED2);
 		usb_endpoint_init(&usb_endpoint_bulk_in);
-		rf_path_set_direction(RF_PATH_DIRECTION_RX);
+		rf_path_set_direction(&rf_path, RF_PATH_DIRECTION_RX);
 		vector_table.irq[NVIC_SGPIO_IRQ] = sgpio_isr_rx;
 	} else if (_transceiver_mode == TRANSCEIVER_MODE_TX) {
-		gpio_clear(PORT_LED1_3, PIN_LED2);
-		gpio_set(PORT_LED1_3, PIN_LED3);
+		led_off(LED2);
+		led_on(LED3);
 		usb_endpoint_init(&usb_endpoint_bulk_out);
-		rf_path_set_direction(RF_PATH_DIRECTION_TX);
+		rf_path_set_direction(&rf_path, RF_PATH_DIRECTION_TX);
 		vector_table.irq[NVIC_SGPIO_IRQ] = sgpio_isr_tx;
 	} else {
-		gpio_clear(PORT_LED1_3, PIN_LED2);
-		gpio_clear(PORT_LED1_3, PIN_LED3);
-		rf_path_set_direction(RF_PATH_DIRECTION_OFF);
+		led_off(LED2);
+		led_off(LED3);
+		rf_path_set_direction(&rf_path, RF_PATH_DIRECTION_OFF);
 		vector_table.irq[NVIC_SGPIO_IRQ] = sgpio_isr_rx;
 	}
 
 	if( _transceiver_mode != TRANSCEIVER_MODE_OFF ) {
-		si5351c_activate_best_clock_source();
-		baseband_streaming_enable();
+		si5351c_activate_best_clock_source(&clock_gen);
+		baseband_streaming_enable(&sgpio_config);
 	}
 }
 
@@ -94,6 +94,11 @@ usb_request_status_t usb_vendor_request_set_transceiver_mode(
 		case TRANSCEIVER_MODE_RX:
 		case TRANSCEIVER_MODE_TX:
 			set_transceiver_mode(endpoint->setup.value);
+			usb_transfer_schedule_ack(endpoint->in);
+			return USB_REQUEST_STATUS_OK;
+		case TRANSCEIVER_MODE_CPLD_UPDATE:
+			usb_endpoint_init(&usb_endpoint_bulk_out);
+			start_cpld_update = true;
 			usb_transfer_schedule_ack(endpoint->in);
 			return USB_REQUEST_STATUS_OK;
 		default:
@@ -134,6 +139,7 @@ static const usb_request_handler_fn vendor_request_handler[] = {
 	NULL,
 #endif
 	usb_vendor_request_set_freq_explicit,
+	usb_vendor_request_read_wcid,  // USB_WCID_VENDOR_REQ
 };
 
 static const uint32_t vendor_request_handler_count =
@@ -170,16 +176,36 @@ void usb_configuration_changed(
 	if( device->configuration->number == 1 ) {
 		// transceiver configuration
 		cpu_clock_pll1_max_speed();
-		gpio_set(PORT_LED1_3, PIN_LED1);
-	} else if( device->configuration->number == 2 ) {
-		// CPLD update configuration
-		cpu_clock_pll1_max_speed();
-		usb_endpoint_init(&usb_endpoint_bulk_out);
-		start_cpld_update = true;
+		led_on(LED1);
 	} else {
 		/* Configuration number equal 0 means usb bus reset. */
 		cpu_clock_pll1_low_speed();
-		gpio_clear(PORT_LED1_3, PIN_LED1);
+		led_off(LED1);
+	}
+}
+
+void usb_set_descriptor_by_serial_number(void)
+{
+	iap_cmd_res_t iap_cmd_res;
+	
+	/* Read IAP Serial Number Identification */
+	iap_cmd_res.cmd_param.command_code = IAP_CMD_READ_SERIAL_NO;
+	iap_cmd_call(&iap_cmd_res);
+	
+	if (iap_cmd_res.status_res.status_ret == CMD_SUCCESS) {
+		usb_descriptor_string_serial_number[0] = USB_DESCRIPTOR_STRING_SERIAL_BUF_LEN;
+		usb_descriptor_string_serial_number[1] = USB_DESCRIPTOR_TYPE_STRING;
+		
+		/* 32 characters of serial number, convert to UTF-16LE */
+		for (size_t i=0; i<USB_DESCRIPTOR_STRING_SERIAL_LEN; i++) {
+			const uint_fast8_t nibble = (iap_cmd_res.status_res.iap_result[i >> 3] >> (28 - (i & 7) * 4)) & 0xf;
+			const char c = (nibble > 9) ? ('a' + nibble - 10) : ('0' + nibble);
+			usb_descriptor_string_serial_number[2 + i * 2] = c;
+			usb_descriptor_string_serial_number[3 + i * 2] = 0x00;
+		}
+	} else {
+		usb_descriptor_string_serial_number[0] = 2;
+		usb_descriptor_string_serial_number[1] = USB_DESCRIPTOR_TYPE_STRING;
 	}
 }
 
@@ -190,6 +216,8 @@ int main(void) {
 	enable_rf_power();
 #endif
 	cpu_clock_init();
+
+	usb_set_descriptor_by_serial_number();
 
 	usb_set_configuration_changed_cb(usb_configuration_changed);
 	usb_peripheral_reset();
@@ -208,9 +236,7 @@ int main(void) {
 
 	usb_run(&usb_device);
 	
-	ssp1_init();
-
-	rf_path_init();
+	rf_path_init(&rf_path);
 
 	unsigned int phase = 0;
 	while(true) {

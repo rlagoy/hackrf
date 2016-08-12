@@ -25,11 +25,16 @@ extern uint8_t usb_descriptor_device[];
 extern uint8_t usb_descriptor_device_qualifier[];
 extern uint8_t usb_descriptor_configuration_full_speed[];
 extern uint8_t usb_descriptor_configuration_high_speed[];
-extern uint8_t usb_descriptor_configuration_cpld_update_full_speed[];
-extern uint8_t usb_descriptor_configuration_cpld_update_high_speed[];
 extern uint8_t usb_descriptor_string_languages[];
 extern uint8_t usb_descriptor_string_manufacturer[];
 extern uint8_t usb_descriptor_string_product[];
+
+#define USB_DESCRIPTOR_STRING_SERIAL_LEN 32
+#define USB_DESCRIPTOR_STRING_SERIAL_BUF_LEN (USB_DESCRIPTOR_STRING_SERIAL_LEN*2 + 2) /* UTF-16LE */
 extern uint8_t usb_descriptor_string_serial_number[];
 
 extern uint8_t* usb_descriptor_strings[];
+
+#define USB_WCID_VENDOR_REQ 0x19
+extern uint8_t wcid_string_descriptor[];
+extern uint8_t wcid_feature_descriptor[];
